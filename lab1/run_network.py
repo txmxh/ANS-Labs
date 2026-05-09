@@ -44,12 +44,12 @@ class NetworkTopo(Topo):
         # Switches
         ############################################################
 
-        s1 = self.addSwitch('s1')
-        s2 = self.addSwitch('s2')
-        s3 = self.addSwitch('s3')   # Router
+        s1 = self.addSwitch('s1', dpid='1')
+        s2 = self.addSwitch('s2', dpid='2')
+        s3 = self.addSwitch('s3', dpid='3')
 
         ############################################################
-        # Link properties
+        # Link options
         ############################################################
 
         link_opts = dict(
@@ -58,7 +58,7 @@ class NetworkTopo(Topo):
         )
 
         ############################################################
-        # Host connections
+        # Host links
         ############################################################
 
         self.addLink(h1, s1, **link_opts)
@@ -67,11 +67,9 @@ class NetworkTopo(Topo):
         self.addLink(ser, s2, **link_opts)
 
         ############################################################
-        # IMPORTANT:
-        # Explicit router interface numbering
+        # Router links with FIXED PORT NUMBERS
         ############################################################
 
-        # s3-eth1 -> internal hosts network
         self.addLink(
             s1,
             s3,
@@ -79,7 +77,6 @@ class NetworkTopo(Topo):
             **link_opts
         )
 
-        # s3-eth2 -> server network
         self.addLink(
             s2,
             s3,
@@ -87,7 +84,6 @@ class NetworkTopo(Topo):
             **link_opts
         )
 
-        # s3-eth3 -> external network
         self.addLink(
             ext,
             s3,
