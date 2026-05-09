@@ -16,11 +16,29 @@ class NetworkTopo(Topo):
         # Hosts
         ############################################################
 
-        h1 = self.addHost('h1', ip='10.0.1.2/24', defaultRoute='via 10.0.1.1')
-        h2 = self.addHost('h2', ip='10.0.1.3/24', defaultRoute='via 10.0.1.1')
-        ser = self.addHost('ser', ip='10.0.2.2/24', defaultRoute='via 10.0.2.1')
-        ext = self.addHost('ext', ip='192.168.1.123/24', defaultRoute='via 192.168.1.1')
+        h1 = self.addHost('h1',
+            ip='10.0.1.2/24',
+            mac='00:00:00:00:00:01',
+            defaultRoute='via 10.0.1.1'
+        )
 
+        h2 = self.addHost('h2',
+            ip='10.0.1.3/24',
+            mac='00:00:00:00:00:02',
+            defaultRoute='via 10.0.1.1'
+        )
+
+        ser = self.addHost('ser',
+            ip='10.0.2.2/24',
+            mac='00:00:00:00:00:03',
+            defaultRoute='via 10.0.2.1'
+        )
+
+        ext = self.addHost('ext',
+            ip='192.168.1.123/24',
+            mac='00:00:00:00:00:04',
+            defaultRoute='via 192.168.1.1'
+        )
         ############################################################
         # Switches
         ############################################################
@@ -60,8 +78,7 @@ def run():
         topo=NetworkTopo(),
         switch=OVSKernelSwitch,
         link=TCLink,
-        controller=None,
-        autoSetMacs=True
+        controller=None
     )
 
     net.addController(
