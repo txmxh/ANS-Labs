@@ -45,11 +45,11 @@ class NetworkTopo(Topo):
 
 
 
-    def _init_(self):
+    def __init__(self):
 
 
 
-        Topo._init_(self)
+        Topo.__init__(self)
 
 
 
