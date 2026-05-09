@@ -9,12 +9,12 @@ class LearningSwitch(app_manager.RyuApp):
 
     def __init__(self, *args, **kwargs):
         super(LearningSwitch, self).__init__(*args, **kwargs)
-        # Router configurations from manual [cite: 887, 893]
+        # Router configurations from manual
         self.port_to_own_mac = {1: "00:00:00:00:01:01", 2: "00:00:00:00:01:02", 3: "00:00:00:00:01:03"}
         self.port_to_own_ip = {1: "10.0.1.1", 2: "10.0.2.1", 3: "192.168.1.1"}
-        # Per-switch MAC table [cite: 856]
+        # Per-switch MAC table
         self.mac_to_port = {}
-        # Router's ARP cache to remember host MACs [cite: 883]
+        # Router's ARP cache to remember host MACs
         self.arp_table = {"10.0.1.2": "00:00:00:00:00:01", "10.0.1.3": "00:00:00:00:00:02", 
                           "10.0.2.2": "00:00:00:00:00:03", "192.168.1.123": "00:00:00:00:00:04"}
 
@@ -51,7 +51,7 @@ class LearningSwitch(app_manager.RyuApp):
         arp_pkt = pkt.get_protocol(arp.arp)
         ipv4_pkt = pkt.get_protocol(ipv4.ipv4)
 
-        if dpid == 3:  # Router Logic (s3) [cite: 879, 950]
+        if dpid == 3:  # Router Logic (s3)
             if arp_pkt and arp_pkt.opcode == arp.ARP_REQUEST:
                 target_ip = arp_pkt.dst_ip
                 if target_ip == self.port_to_own_ip.get(in_port):
@@ -66,15 +66,15 @@ class LearningSwitch(app_manager.RyuApp):
                     datapath.send_msg(out)
 
             elif ipv4_pkt:
-                # Security: Block external discovery pings [cite: 899]
+                # Security: Block external discovery pings
                 if ipv4_pkt.src.startswith('192.168.1') and pkt.get_protocol(icmp.icmp): return
-                # Security: Block ext <-> ser connections [cite: 908]
+                # Security: Block ext <-> ser connections
                 if (ipv4_pkt.src == '192.168.1.123' and ipv4_pkt.dst == '10.0.2.2') or \
                    (ipv4_pkt.src == '10.0.2.2' and ipv4_pkt.dst == '192.168.1.123'): return
-                # Security: Only allow pinging own gateway [cite: 913]
+                # Security: Only allow pinging own gateway
                 if ipv4_pkt.dst in self.port_to_own_ip.values() and ipv4_pkt.dst != self.port_to_own_ip.get(in_port): return
 
-                # Routing Logic [cite: 950]
+                # Routing Logic
                 out_port = None
                 if ipv4_pkt.dst.startswith('10.0.1'): out_port = 1
                 elif ipv4_pkt.dst.startswith('10.0.2'): out_port = 2
@@ -93,7 +93,7 @@ class LearningSwitch(app_manager.RyuApp):
                                                   actions=actions, data=msg.data if msg.buffer_id == ofproto.OFP_NO_BUFFER else None)
                         datapath.send_msg(out)
 
-        else:  # Learning Switch Logic (s1/s2) [cite: 856, 949]
+        else:  # Learning Switch Logic (s1/s2)
             self.mac_to_port.setdefault(dpid, {})
             self.mac_to_port[dpid][src_mac] = in_port
             out_port = self.mac_to_port[dpid].get(dst_mac, ofproto.OFPP_FLOOD)
