@@ -36,6 +36,8 @@ class LearningSwitch(app_manager.RyuApp):
             "192.168.1.123": "00:00:00:00:00:04"
         }
 
+        self.router_dpid = None
+
     ####################################################################
     # Add forwarding flow
     ####################################################################
@@ -86,6 +88,12 @@ class LearningSwitch(app_manager.RyuApp):
 
         match = parser.OFPMatch()
 
+        self.logger.info("Switch connected with DPID %s", datapath.id)
+
+        # Detect router switch automatically
+        if self.router_dpid is None and datapath.id == 3:
+            self.router_dpid = datapath.id
+
         actions = [
             parser.OFPActionOutput(
                 ofproto.OFPP_CONTROLLER,
@@ -95,6 +103,7 @@ class LearningSwitch(app_manager.RyuApp):
 
         self.add_flow(datapath, 0, match, actions)
 
+      
     ####################################################################
     # Main packet handler
     ####################################################################
@@ -130,7 +139,7 @@ class LearningSwitch(app_manager.RyuApp):
         ################################################################
         # ROUTER LOGIC (s3)
         ################################################################
-        if dpid == 3:
+        if dpid == self.router_dpid:
 
             ############################################################
             # Learn ARP entries dynamically
@@ -290,7 +299,9 @@ class LearningSwitch(app_manager.RyuApp):
                 # Install forwarding flow
                 ########################################################
                 match = parser.OFPMatch(
+                    in_port=in_port,
                     eth_type=0x0800,
+                    ipv4_src=src_ip,
                     ipv4_dst=dst_ip
                 )
 
@@ -344,6 +355,7 @@ class LearningSwitch(app_manager.RyuApp):
 
                 match = parser.OFPMatch(
                     in_port=in_port,
+                    eth_src=src,
                     eth_dst=dst
                 )
 
