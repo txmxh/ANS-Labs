@@ -60,10 +60,16 @@ class LearningSwitch(app_manager.RyuApp):
         datapath.send_msg(mod)
 
     # Handle the packet_in event
-    @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
+    @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER) 
     def _packet_in_handler(self, ev):
-        
         msg = ev.msg
         datapath = msg.datapath
-
-        # Your controller implementation should start here
+        dpid = datapath.id  # This identifies which switch sent the packet
+        
+        # 1. Identify the device
+        if dpid == 3:  # This is s3, the Router
+            self.logger.info("Packet received at Router (s3)")
+            # TODO: Implement Router Logic (Task 5)
+        else:          # This is s1 or s2, the Learning Switches
+            self.logger.info("Packet received at Switch (s1 or s2)")
+            # TODO: Implement Learning Switch Logic (Task 4)
