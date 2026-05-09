@@ -1,4 +1,3 @@
-# Fixed `ans_controller.py`
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER, set_ev_cls
@@ -29,27 +28,19 @@ class LearningSwitch(app_manager.RyuApp):
         # MAC learning tables for switches
         self.mac_to_port = {}
 
-        # ARP cache learned dynamically
-        self.arp_table = {}
+        # Static ARP table
+        self.arp_table = {
+            "10.0.1.2": "00:00:00:00:00:01",
+            "10.0.1.3": "00:00:00:00:00:02",
+            "10.0.2.2": "00:00:00:00:00:03",
+            "192.168.1.123": "00:00:00:00:00:04"
+        }
 
-    @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
-    def switch_features_handler(self, ev):
-        datapath = ev.msg.datapath
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
-
-        # Send unknown packets to controller
-        match = parser.OFPMatch()
-        actions = [
-            parser.OFPActionOutput(
-                ofproto.OFPP_CONTROLLER,
-                ofproto.OFPCML_NO_BUFFER
-            )
-        ]
-
-        self.add_flow(datapath, 0, match, actions)
-
+    ####################################################################
+    # Add forwarding flow
+    ####################################################################
     def add_flow(self, datapath, priority, match, actions):
+
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
@@ -69,17 +60,57 @@ class LearningSwitch(app_manager.RyuApp):
 
         datapath.send_msg(mod)
 
+    ####################################################################
+    # Add DROP flow
+    ####################################################################
+    def add_drop_flow(self, datapath, priority, match):
+
+        mod = datapath.ofproto_parser.OFPFlowMod(
+            datapath=datapath,
+            priority=priority,
+            match=match,
+            instructions=[]
+        )
+
+        datapath.send_msg(mod)
+
+    ####################################################################
+    # Install table-miss flow
+    ####################################################################
+    @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
+    def switch_features_handler(self, ev):
+
+        datapath = ev.msg.datapath
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+
+        match = parser.OFPMatch()
+
+        actions = [
+            parser.OFPActionOutput(
+                ofproto.OFPP_CONTROLLER,
+                ofproto.OFPCML_NO_BUFFER
+            )
+        ]
+
+        self.add_flow(datapath, 0, match, actions)
+
+    ####################################################################
+    # Main packet handler
+    ####################################################################
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
 
         msg = ev.msg
         datapath = msg.datapath
-        ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
+        ofproto = datapath.ofproto
+
         dpid = datapath.id
         in_port = msg.match['in_port']
 
         pkt = packet.Packet(msg.data)
+
         eth = pkt.get_protocol(ethernet.ethernet)
 
         if eth is None:
@@ -101,20 +132,23 @@ class LearningSwitch(app_manager.RyuApp):
         ################################################################
         if dpid == 3:
 
-            # Learn ARP dynamically
+            ############################################################
+            # Learn ARP entries dynamically
+            ############################################################
             if arp_pkt:
                 self.arp_table[arp_pkt.src_ip] = arp_pkt.src_mac
 
             ############################################################
-            # Handle ARP requests to router gateways
+            # ARP handling for router gateways
             ############################################################
             if arp_pkt and arp_pkt.opcode == arp.ARP_REQUEST:
 
                 target_ip = arp_pkt.dst_ip
 
+                # Only respond for router gateway IPs
                 if target_ip in self.port_to_own_ip.values():
 
-                    # Only allow hosts to ping their OWN gateway
+                    # Only allow host to access OWN gateway
                     if target_ip != self.port_to_own_ip[in_port]:
                         return
 
@@ -125,8 +159,8 @@ class LearningSwitch(app_manager.RyuApp):
                     arp_reply.add_protocol(
                         ethernet.ethernet(
                             ethertype=0x0806,
-                            dst=src,
-                            src=router_mac
+                            src=router_mac,
+                            dst=src
                         )
                     )
 
@@ -142,7 +176,9 @@ class LearningSwitch(app_manager.RyuApp):
 
                     arp_reply.serialize()
 
-                    actions = [parser.OFPActionOutput(in_port)]
+                    actions = [
+                        parser.OFPActionOutput(in_port)
+                    ]
 
                     out = parser.OFPPacketOut(
                         datapath=datapath,
@@ -157,26 +193,66 @@ class LearningSwitch(app_manager.RyuApp):
                 return
 
             ############################################################
-            # IPv4 routing
+            # IPv4 Routing
             ############################################################
             if ipv4_pkt:
 
                 src_ip = ipv4_pkt.src
                 dst_ip = ipv4_pkt.dst
 
-                # Block ICMP from external host to internal hosts
-                if src_ip.startswith("192.168.1") and icmp_pkt:
-                    return
-
-                # Block TCP/UDP between ext and ser
+                ########################################################
+                # BLOCK: ext cannot ping internal hosts
+                ########################################################
                 if (
-                    (src_ip == "192.168.1.123" and dst_ip == "10.0.2.2")
-                    or
-                    (src_ip == "10.0.2.2" and dst_ip == "192.168.1.123")
+                    src_ip.startswith("192.168.1.")
+                    and
+                    (
+                        dst_ip.startswith("10.0.1.")
+                        or
+                        dst_ip.startswith("10.0.2.")
+                    )
+                    and icmp_pkt
                 ):
+
+                    match = parser.OFPMatch(
+                        eth_type=0x0800,
+                        ipv4_src=src_ip,
+                        ipv4_dst=dst_ip,
+                        ip_proto=1
+                    )
+
+                    self.add_drop_flow(datapath, 100, match)
+
                     return
 
-                # Determine output port
+                ########################################################
+                # BLOCK: ext <-> ser communication
+                ########################################################
+                if (
+                    (
+                        src_ip.startswith("192.168.1.")
+                        and dst_ip == "10.0.2.2"
+                    )
+                    or
+                    (
+                        src_ip == "10.0.2.2"
+                        and dst_ip.startswith("192.168.1.")
+                    )
+                ):
+
+                    match = parser.OFPMatch(
+                        eth_type=0x0800,
+                        ipv4_src=src_ip,
+                        ipv4_dst=dst_ip
+                    )
+
+                    self.add_drop_flow(datapath, 100, match)
+
+                    return
+
+                ########################################################
+                # Determine outgoing port
+                ########################################################
                 out_port = None
 
                 if dst_ip.startswith("10.0.1."):
@@ -191,45 +267,18 @@ class LearningSwitch(app_manager.RyuApp):
                 if out_port is None:
                     return
 
+                ########################################################
+                # Resolve destination MAC
+                ########################################################
                 if dst_ip not in self.arp_table:
-                    # Flood ARP request to learn destination MAC
-                    arp_request = packet.Packet()
-
-                    arp_request.add_protocol(
-                        ethernet.ethernet(
-                            ethertype=0x0806,
-                            src=self.port_to_own_mac[out_port],
-                            dst='ff:ff:ff:ff:ff:ff'
-                        )
-                    )
-
-                    arp_request.add_protocol(
-                        arp.arp(
-                            opcode=arp.ARP_REQUEST,
-                            src_mac=self.port_to_own_mac[out_port],
-                            src_ip=self.port_to_own_ip[out_port],
-                            dst_mac='00:00:00:00:00:00',
-                            dst_ip=dst_ip
-                        )
-                    )
-
-                    arp_request.serialize()
-
-                    arp_out = parser.OFPPacketOut(
-                        datapath=datapath,
-                        buffer_id=ofproto.OFP_NO_BUFFER,
-                        in_port=ofproto.OFPP_CONTROLLER,
-                        actions=[parser.OFPActionOutput(out_port)],
-                        data=arp_request.data
-                    )
-
-                    datapath.send_msg(arp_out)
-
                     return
 
                 dst_mac = self.arp_table[dst_ip]
                 src_mac = self.port_to_own_mac[out_port]
 
+                ########################################################
+                # Router forwarding actions
+                ########################################################
                 actions = [
                     parser.OFPActionSetField(eth_src=src_mac),
                     parser.OFPActionSetField(eth_dst=dst_mac),
@@ -237,6 +286,9 @@ class LearningSwitch(app_manager.RyuApp):
                     parser.OFPActionOutput(out_port)
                 ]
 
+                ########################################################
+                # Install forwarding flow
+                ########################################################
                 match = parser.OFPMatch(
                     eth_type=0x0800,
                     ipv4_dst=dst_ip
@@ -244,12 +296,19 @@ class LearningSwitch(app_manager.RyuApp):
 
                 self.add_flow(datapath, 10, match, actions)
 
+                ########################################################
+                # Forward packet
+                ########################################################
                 out = parser.OFPPacketOut(
                     datapath=datapath,
                     buffer_id=msg.buffer_id,
                     in_port=in_port,
                     actions=actions,
-                    data=(msg.data if msg.buffer_id == ofproto.OFP_NO_BUFFER else None)
+                    data=(
+                        msg.data
+                        if msg.buffer_id == ofproto.OFP_NO_BUFFER
+                        else None
+                    )
                 )
 
                 datapath.send_msg(out)
@@ -261,18 +320,26 @@ class LearningSwitch(app_manager.RyuApp):
 
             self.mac_to_port.setdefault(dpid, {})
 
+            ############################################################
             # Learn source MAC
+            ############################################################
             self.mac_to_port[dpid][src] = in_port
 
+            ############################################################
             # Lookup destination MAC
+            ############################################################
             if dst in self.mac_to_port[dpid]:
                 out_port = self.mac_to_port[dpid][dst]
             else:
                 out_port = ofproto.OFPP_FLOOD
 
-            actions = [parser.OFPActionOutput(out_port)]
+            actions = [
+                parser.OFPActionOutput(out_port)
+            ]
 
-            # Install flow only for known destinations
+            ############################################################
+            # Install switch flow
+            ############################################################
             if out_port != ofproto.OFPP_FLOOD:
 
                 match = parser.OFPMatch(
@@ -282,12 +349,19 @@ class LearningSwitch(app_manager.RyuApp):
 
                 self.add_flow(datapath, 1, match, actions)
 
+            ############################################################
+            # Send packet
+            ############################################################
             out = parser.OFPPacketOut(
                 datapath=datapath,
                 buffer_id=msg.buffer_id,
                 in_port=in_port,
                 actions=actions,
-                data=(msg.data if msg.buffer_id == ofproto.OFP_NO_BUFFER else None)
+                data=(
+                    msg.data
+                    if msg.buffer_id == ofproto.OFP_NO_BUFFER
+                    else None
+                )
             )
 
             datapath.send_msg(out)
