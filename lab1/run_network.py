@@ -12,7 +12,10 @@ class NetworkTopo(Topo):
 
     def build(self):
 
+        ############################################################
         # Hosts
+        ############################################################
+
         h1 = self.addHost(
             'h1',
             ip='10.0.1.2/24',
@@ -37,32 +40,60 @@ class NetworkTopo(Topo):
             defaultRoute='via 192.168.1.1'
         )
 
+        ############################################################
         # Switches
+        ############################################################
+
         s1 = self.addSwitch('s1')
         s2 = self.addSwitch('s2')
-        s3 = self.addSwitch('s3')
+        s3 = self.addSwitch('s3')   # Router
 
-        link_opts = dict(bw=15, delay='10ms')
+        ############################################################
+        # Link properties
+        ############################################################
 
-        # Internal LAN
+        link_opts = dict(
+            bw=15,
+            delay='10ms'
+        )
+
+        ############################################################
+        # Host connections
+        ############################################################
+
         self.addLink(h1, s1, **link_opts)
         self.addLink(h2, s1, **link_opts)
 
-        # Server LAN
         self.addLink(ser, s2, **link_opts)
 
+        ############################################################
         # IMPORTANT:
         # Explicit router interface numbering
+        ############################################################
 
-        # s3-eth1 -> internal network 10.0.1.0/24
-        self.addLink(s1, s3, port2=1, **link_opts)
+        # s3-eth1 -> internal hosts network
+        self.addLink(
+            s1,
+            s3,
+            port2=1,
+            **link_opts
+        )
 
-        # s3-eth2 -> server network 10.0.2.0/24
-        self.addLink(s2, s3, port2=2, **link_opts)
+        # s3-eth2 -> server network
+        self.addLink(
+            s2,
+            s3,
+            port2=2,
+            **link_opts
+        )
 
-        # s3-eth3 -> external network 192.168.1.0/24
-        self.addLink(ext, s3, port2=3, **link_opts)
-
+        # s3-eth3 -> external network
+        self.addLink(
+            ext,
+            s3,
+            port2=3,
+            **link_opts
+        )
 
 
 def run():
@@ -77,12 +108,20 @@ def run():
         autoSetMacs=True
     )
 
+    ############################################################
+    # Remote controller
+    ############################################################
+
     net.addController(
         'c1',
         controller=RemoteController,
         ip='127.0.0.1',
         port=6653
     )
+
+    ############################################################
+    # Start network
+    ############################################################
 
     net.start()
 
@@ -92,5 +131,7 @@ def run():
 
 
 if __name__ == '__main__':
+
     setLogLevel('info')
+
     run()
