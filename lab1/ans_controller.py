@@ -191,8 +191,40 @@ class LearningSwitch(app_manager.RyuApp):
                 if out_port is None:
                     return
 
-                # Need destination MAC
                 if dst_ip not in self.arp_table:
+                    # Flood ARP request to learn destination MAC
+                    arp_request = packet.Packet()
+
+                    arp_request.add_protocol(
+                        ethernet.ethernet(
+                            ethertype=0x0806,
+                            src=self.port_to_own_mac[out_port],
+                            dst='ff:ff:ff:ff:ff:ff'
+                        )
+                    )
+
+                    arp_request.add_protocol(
+                        arp.arp(
+                            opcode=arp.ARP_REQUEST,
+                            src_mac=self.port_to_own_mac[out_port],
+                            src_ip=self.port_to_own_ip[out_port],
+                            dst_mac='00:00:00:00:00:00',
+                            dst_ip=dst_ip
+                        )
+                    )
+
+                    arp_request.serialize()
+
+                    arp_out = parser.OFPPacketOut(
+                        datapath=datapath,
+                        buffer_id=ofproto.OFP_NO_BUFFER,
+                        in_port=ofproto.OFPP_CONTROLLER,
+                        actions=[parser.OFPActionOutput(out_port)],
+                        data=arp_request.data
+                    )
+
+                    datapath.send_msg(arp_out)
+
                     return
 
                 dst_mac = self.arp_table[dst_ip]
