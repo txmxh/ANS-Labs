@@ -134,3 +134,64 @@ class Fattree:
                 for j in range(k // 2):
                     core_idx = i * (k // 2) + j
                     agg_sw.add_edge(core_switches[core_idx])
+
+
+# ---- SANITY CHECKS ----
+# Run this file directly to verify the topology is correctly built:
+#   python3 topo.py
+if __name__ == '__main__':
+    for k in [4, 6, 8]:
+        ft = Fattree(k)
+
+        expected_core = (k // 2) ** 2
+        expected_agg  = k * (k // 2)
+        expected_edge = k * (k // 2)
+        expected_switches = expected_core + expected_agg + expected_edge
+        expected_servers  = k * (k // 2) ** 2
+
+        # Count switches by type
+        core_count = sum(1 for s in ft.switches if s.type == 'core')
+        agg_count  = sum(1 for s in ft.switches if s.type == 'agg')
+        edge_count = sum(1 for s in ft.switches if s.type == 'edge')
+
+        # Count unique links
+        seen = set()
+        for node in ft.switches + ft.servers:
+            for edge in node.edges:
+                seen.add(id(edge))
+        total_links = len(seen)
+
+        # Expected links:
+        #   core <-> agg  : k^2 links  (each of (k/2)^2 core switches has k ports)
+        #   agg  <-> edge : k*(k/2)^2 links  (each pod: k/2 agg * k/2 edge)
+        #   edge <-> host : k*(k/2)^2 links  (each pod: k/2 edge * k/2 hosts)
+        expected_links = (k**2) + k*(k//2)**2 + k*(k//2)**2
+
+        # Node degree checks
+        core_degree  = [len(s.edges) for s in ft.switches if s.type == 'core']
+        agg_degree   = [len(s.edges) for s in ft.switches if s.type == 'agg']
+        edge_degree  = [len(s.edges) for s in ft.switches if s.type == 'edge']
+        server_degree = [len(s.edges) for s in ft.servers]
+
+        print(f"\n--- k={k} ---")
+        print(f"  Core switches : {core_count:3d}  (expected {expected_core})")
+        print(f"  Agg  switches : {agg_count:3d}  (expected {expected_agg})")
+        print(f"  Edge switches : {edge_count:3d}  (expected {expected_edge})")
+        print(f"  Total switches: {len(ft.switches):3d}  (expected {expected_switches})")
+        print(f"  Servers       : {len(ft.servers):3d}  (expected {expected_servers})")
+        print(f"  Total links   : {total_links:3d}  (expected {expected_links})")
+        print(f"  Core degree   : min={min(core_degree)}, max={max(core_degree)}  (expected {k})")
+        print(f"  Agg  degree   : min={min(agg_degree)},  max={max(agg_degree)}   (expected {k})")
+        print(f"  Edge degree   : min={min(edge_degree)},  max={max(edge_degree)}   (expected {k})")
+        print(f"  Server degree : min={min(server_degree)}, max={max(server_degree)}  (expected 1)")
+
+        assert core_count  == expected_core,     f"k={k}: wrong core count"
+        assert agg_count   == expected_agg,      f"k={k}: wrong agg count"
+        assert edge_count  == expected_edge,     f"k={k}: wrong edge count"
+        assert len(ft.servers) == expected_servers, f"k={k}: wrong server count"
+        assert total_links == expected_links,    f"k={k}: wrong link count"
+        assert all(d == k for d in core_degree), f"k={k}: wrong core degree"
+        assert all(d == k for d in agg_degree),  f"k={k}: wrong agg degree"
+        assert all(d == k for d in edge_degree), f"k={k}: wrong edge degree"
+        assert all(d == 1 for d in server_degree), f"k={k}: wrong server degree"
+        print(f"  All assertions passed!")
