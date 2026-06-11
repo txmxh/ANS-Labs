@@ -165,7 +165,7 @@ if __name__ == '__main__':
         #   core <-> agg  : k^2 links  (each of (k/2)^2 core switches has k ports)
         #   agg  <-> edge : k*(k/2)^2 links  (each pod: k/2 agg * k/2 edge)
         #   edge <-> host : k*(k/2)^2 links  (each pod: k/2 edge * k/2 hosts)
-        expected_links = (k**2) + k*(k//2)**2 + k*(k//2)**2
+        expected_links = (k//2)**2 * k + k*(k//2)**2 + k*(k//2)**2
 
         # Node degree checks
         core_degree  = [len(s.edges) for s in ft.switches if s.type == 'core']
