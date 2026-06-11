@@ -1,3 +1,24 @@
+"""
+ Copyright (c) 2026 Computer Networks Group @ UPB
+
+ Permission is hereby granted, free of charge, to any person obtaining a copy of
+ this software and associated documentation files (the "Software"), to deal in
+ the Software without restriction, including without limitation the rights to
+ use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ the Software, and to permit persons to whom the Software is furnished to do so,
+ subject to the following conditions:
+
+ The above copyright notice and this permission notice shall be included in all
+ copies or substantial portions of the Software.
+
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+ FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+ COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ """
+
 #!/bin/env python3
 
 from mininet.topo import Topo
@@ -7,54 +28,47 @@ from mininet.link import TCLink
 from mininet.cli import CLI
 from mininet.log import setLogLevel
 
+
 class NetworkTopo(Topo):
-    def build(self):
-        # 1. Add Hosts (Order matters for autoSetMacs)
-        # h1  -> 00:00:00:00:00:01
-        h1 = self.addHost('h1', ip='10.0.1.2/24', defaultRoute='via 10.0.1.1')
-        # h2  -> 00:00:00:00:00:02
-        h2 = self.addHost('h2', ip='10.0.1.3/24', defaultRoute='via 10.0.1.1')
-        # ser -> 00:00:00:00:00:03
-        ser = self.addHost('ser', ip='10.0.2.2/24', defaultRoute='via 10.0.2.1')
-        # ext -> 00:00:00:00:00:04
-        ext = self.addHost('ext', ip='192.168.1.123/24', defaultRoute='via 192.168.1.1')
 
-        # 2. Add Switches
-        s1 = self.addSwitch('s1') # LAN Switch
-        s2 = self.addSwitch('s2') # Server Switch
-        s3 = self.addSwitch('s3') # Router
+    def __init__(self):
 
-        link_opts = dict(bw=15, delay='10ms')
+        Topo.__init__(self)
 
-        # 3. Add Links
-        self.addLink(h1, s1, **link_opts)
-        self.addLink(h2, s1, **link_opts)
-        self.addLink(ser, s2, **link_opts)
+        # Build the specified network topology here
+        
+        # Adding Hosts
+        h1 = self.addHost("h1", ip = "10.0.1.2/24", defaultRoute='via 10.0.1.1')
+        h2 = self.addHost("h2", ip = "10.0.1.3/24", defaultRoute='via 10.0.1.1')
+        ser = self.addHost("ser", ip = "10.0.2.2/24", defaultRoute='via 10.0.2.1')
+        ext = self.addHost("ext", ip = "192.168.1.123/24", defaultRoute='via 192.168.1.1')
 
-        # Router (s3) links with explicit port mapping to match your controller
-        # port 1: 10.0.1.x, port 2: 10.0.2.x, port 3: 192.168.1.x
-        self.addLink(s1, s3, port2=1, **link_opts)
-        self.addLink(s2, s3, port2=2, **link_opts)
-        self.addLink(ext, s3, port2=3, **link_opts)
+        # Adding Switches
+        s1 = self.addSwitch("s1")
+        s2 = self.addSwitch("s2")
+        s3 = self.addSwitch("s3")
+
+        # Creating Links
+        e1 = self.addLink(h1, s1, bw=15, delay="10ms")
+        e2 = self.addLink(h2, s1, bw=15, delay="10ms")
+        e3 = self.addLink(ser, s2, bw=15, delay="10ms")
+        e4 = self.addLink(ext, s3, bw=15, delay="10ms")
+        e5 = self.addLink(s1, s3, bw=15, delay="10ms")
+        e6 = self.addLink(s2, s3, bw=15, delay="10ms")
 
 def run():
     topo = NetworkTopo()
-    net = Mininet(
-        topo=topo,
-        switch=OVSKernelSwitch,
-        link=TCLink,
-        controller=None,
-        autoSetMacs=True
-    )
-
+    net = Mininet(topo=topo,
+                  switch=OVSKernelSwitch,
+                  link=TCLink,
+                  controller=None)
     net.addController(
-        'c1',
-        controller=RemoteController,
-        ip='127.0.0.1',
-        port=6653
-    )
-
+        'c1', 
+        controller=RemoteController, 
+        ip="127.0.0.1", 
+        port=6653)
     net.start()
+    # net.pingAll()
     CLI(net)
     net.stop()
 
