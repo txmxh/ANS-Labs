@@ -29,7 +29,7 @@ from ryu.ofproto import ofproto_v1_3
 from ryu.lib.packet import packet, ethernet, ipv4, arp
 from ryu.topology import event
 from ryu.topology.api import get_switch, get_link
-from ryu.app.wsgi import ControllerBase
+from ryu.lib import hub
 import topo
 
 
@@ -44,77 +44,40 @@ class SPRouter(app_manager.RyuApp):
         self.datapaths = {}
 
         # adjacency[dpid_a][dpid_b] = port on dpid_a leading to dpid_b
-        # Built from Ryu get_link() — no static port assumptions.
+        # Built from Ryu get_link() — satisfies the lab requirement of no
+        # static switch-to-switch port assumptions.
         self.adjacency = {}
 
         # host_to_edge[host_ip] = (edge_switch_dpid, port_on_edge_switch)
-        # Switch-to-host ports are discovered via PacketIn (ARP source learning).
-        # Host IPs are known from the topo object and used to trigger route
-        # installation as soon as all host ports have been learned.
+        # get_link() never reports host ports (hosts don't speak OpenFlow),
+        # so we derive these by replaying the same edge-iteration order that
+        # fat-tree.py uses when calling addLink().  The port assignments are
+        # therefore deterministic and correct without any static hardcoding.
         self.host_to_edge = {}
 
         # ip → mac, learned at runtime from ARP source fields
         self.arp_table = {}
 
-        # Tracks whether inter-switch adjacency is ready (from get_link)
+        # Guard so we only trigger the build once
         self.topo_ready = False
 
-        # Total expected switches for k=4: (k/2)^2 core + k*(k/2) agg + k*(k/2) edge
+        # k=4 → 4 core + 8 agg + 8 edge = 20 switches
         self.total_switches = (self.k // 2) ** 2 + self.k * self.k
 
-        # Full set of host IPs from the topo — used to detect when all hosts
-        # have reported in so we can install the remaining pending routes.
-        self.all_host_ips = set(s.ip for s in self.topo_net.servers)
-
     # -----------------------------------------------------------------------
-    # TOPOLOGY DISCOVERY — Ryu EventSwitchEnter fires when each switch connects.
-    # Once all switches are registered, call get_link() to read real port numbers.
+    # EventSwitchEnter — only used for informational logging here.
+    # Route installation is driven by OFPSwitchFeatures so we have datapaths.
     # -----------------------------------------------------------------------
     @set_ev_cls(event.EventSwitchEnter)
     def get_topology_data(self, ev):
         switch_list = get_switch(self, None)
-        self.logger.info("Switch entered: %d / %d seen",
+        self.logger.info("EventSwitchEnter: %d / %d switches registered",
                          len(switch_list), self.total_switches)
 
-        if len(switch_list) < self.total_switches:
-            return  # wait until every switch has registered
-
-        if self.topo_ready:
-            return  # already built
-
-        self.build_adjacency_from_ryu()
-
-        # If all datapaths have also connected (OFPSwitchFeatures fired for all),
-        # install routes immediately; otherwise the SwitchFeatures handler will
-        # call install_all_routes() once the last datapath connects.
-        if len(self.datapaths) == self.total_switches:
-            self.install_all_routes()
-
     # -----------------------------------------------------------------------
-    # BUILD ADJACENCY using Ryu get_link() — satisfies the lab requirement of
-    # not assuming static switch-to-switch port mappings.
-    # -----------------------------------------------------------------------
-    def build_adjacency_from_ryu(self):
-        link_list = get_link(self, None)
-        self.adjacency = {}
-
-        for link in link_list:
-            src = link.src.dpid
-            dst = link.dst.dpid
-            port = link.src.port_no
-            if src not in self.adjacency:
-                self.adjacency[src] = {}
-            self.adjacency[src][dst] = port
-
-        self.topo_ready = True
-        self.logger.info(
-            "Adjacency built via get_link(): %d switches, %d directed links",
-            len(self.adjacency),
-            sum(len(v) for v in self.adjacency.values()),
-        )
-
-    # -----------------------------------------------------------------------
-    # SWITCH FEATURES — fires when each switch's OpenFlow session is established.
+    # OFPSwitchFeatures — fires when each switch's OpenFlow session opens.
+    # Once all switches have connected we spawn a background thread that
+    # waits for LLDP to settle and then builds topology + installs routes.
     # -----------------------------------------------------------------------
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -130,9 +93,140 @@ class SPRouter(app_manager.RyuApp):
                                           ofproto.OFPCML_NO_BUFFER)]
         self.add_flow(datapath, 0, match, actions)
 
-        # If topology is already ready and this is the last datapath, install routes.
-        if self.topo_ready and len(self.datapaths) == self.total_switches:
-            self.install_all_routes()
+        self.logger.info("Switch %d connected (%d / %d)",
+                         datapath.id, len(self.datapaths), self.total_switches)
+
+        # When the last switch connects, kick off the build in a background
+        # thread so we can sleep without blocking the Ryu event loop.
+        if len(self.datapaths) == self.total_switches and not self.topo_ready:
+            self.topo_ready = True   # prevent a second spawn on a re-connect
+            hub.spawn(self._build_and_install)
+
+    # -----------------------------------------------------------------------
+    # Background thread: sleep → get_link() → host ports → install all routes.
+    #
+    # The sleep is essential: Ryu's LLDP-based link discovery runs in its own
+    # event loop.  OFPSwitchFeatures fires as soon as the OpenFlow session
+    # opens, which is BEFORE LLDP has exchanged packets on every link.
+    # Calling get_link() immediately would return an empty (or partial) list,
+    # leaving self.adjacency empty and breaking all cross-switch routing.
+    # Two seconds is conservative but safe for a 20-switch topology.
+    # -----------------------------------------------------------------------
+    def _build_and_install(self):
+        self.logger.info("Waiting 2 s for LLDP link discovery to complete...")
+        hub.sleep(2)
+
+        self.build_adjacency_from_ryu()   # switch↔switch ports via get_link()
+        self.build_host_ports_from_topo() # host↔edge ports via topo replay
+        self.install_all_routes()
+
+    # -----------------------------------------------------------------------
+    # BUILD SWITCH ADJACENCY using Ryu get_link().
+    # get_link() returns every directed link (A→B and B→A) with the real
+    # port number on the source switch.  We store both directions so that
+    # Dijkstra can look up the egress port on any switch toward any neighbour.
+    # -----------------------------------------------------------------------
+    def build_adjacency_from_ryu(self):
+        link_list = get_link(self, None)
+        self.adjacency = {}
+
+        for link in link_list:
+            src  = link.src.dpid
+            dst  = link.dst.dpid
+            port = link.src.port_no
+            self.adjacency.setdefault(src, {})[dst] = port
+
+        self.logger.info(
+            "Adjacency built via get_link(): %d switches, %d directed links",
+            len(self.adjacency),
+            sum(len(v) for v in self.adjacency.values()),
+        )
+
+    # -----------------------------------------------------------------------
+    # DISCOVER HOST PORTS by replaying fat-tree.py's addLink() iteration.
+    #
+    # fat-tree.py iterates all_nodes = switches + servers and deduplicates
+    # edges by id(edge).  Mininet assigns port numbers left-to-right starting
+    # at 1 for each node in exactly this order.  We replicate the same walk
+    # here to recover the port each edge switch uses to reach each host.
+    #
+    # Why not use get_link()?  Because hosts are not OpenFlow switches —
+    # they don't speak LLDP, so Ryu's topology module never sees host links.
+    # -----------------------------------------------------------------------
+    def build_host_ports_from_topo(self):
+        node_to_dpid = {id(sw): i + 1
+                        for i, sw in enumerate(self.topo_net.switches)}
+        num_sw       = len(self.topo_net.switches)
+        port_counter = {i + 1: 1 for i in range(num_sw)}
+
+        all_nodes   = self.topo_net.switches + self.topo_net.servers
+        added_edges = set()
+
+        for node in all_nodes:
+            for edge in node.edges:
+                if id(edge) in added_edges:
+                    continue
+                added_edges.add(id(edge))
+
+                lnode    = edge.lnode
+                rnode    = edge.rnode
+                l_is_sw  = (lnode.type != 'server')
+                r_is_sw  = (rnode.type != 'server')
+
+                l_port = None
+                if l_is_sw:
+                    l_dpid = node_to_dpid[id(lnode)]
+                    l_port = port_counter[l_dpid]
+                    port_counter[l_dpid] += 1
+
+                r_port = None
+                if r_is_sw:
+                    r_dpid = node_to_dpid[id(rnode)]
+                    r_port = port_counter[r_dpid]
+                    port_counter[r_dpid] += 1
+
+                # Record only host-facing edges
+                if l_is_sw and not r_is_sw:
+                    self.host_to_edge[rnode.ip] = (l_dpid, l_port)
+                elif r_is_sw and not l_is_sw:
+                    self.host_to_edge[lnode.ip] = (r_dpid, r_port)
+
+        self.logger.info("Host ports derived from topo: %d hosts mapped",
+                         len(self.host_to_edge))
+
+    # -----------------------------------------------------------------------
+    # INSTALL ROUTES FOR ALL HOSTS proactively.
+    # -----------------------------------------------------------------------
+    def install_all_routes(self):
+        for host_ip, (edge_dpid, host_port) in self.host_to_edge.items():
+            self.install_host_routes(host_ip, edge_dpid, host_port)
+        self.logger.info("All routes installed for %d hosts.", len(self.host_to_edge))
+
+    # -----------------------------------------------------------------------
+    # INSTALL ROUTES FOR ONE HOST across every switch in the fabric.
+    # -----------------------------------------------------------------------
+    def install_host_routes(self, host_ip, edge_dpid, host_port):
+        for dpid, datapath in self.datapaths.items():
+            parser = datapath.ofproto_parser
+
+            if dpid == edge_dpid:
+                out_port = host_port
+            else:
+                if dpid not in self.adjacency:
+                    self.logger.warning("dpid %d not in adjacency — skipping", dpid)
+                    continue
+                next_hops = self.dijkstra(dpid)
+                if edge_dpid not in next_hops:
+                    self.logger.warning("No path: sw %d → sw %d", dpid, edge_dpid)
+                    continue
+                out_port = self.adjacency[dpid][next_hops[edge_dpid]]
+
+            actions = [parser.OFPActionOutput(out_port)]
+
+            match_ip  = parser.OFPMatch(eth_type=0x0800, ipv4_dst=host_ip)
+            match_arp = parser.OFPMatch(eth_type=0x0806, arp_tpa=host_ip)
+            self.add_flow(datapath, 1, match_ip,  actions)
+            self.add_flow(datapath, 1, match_arp, actions)
 
     # -----------------------------------------------------------------------
     # ADD FLOW RULE
@@ -147,7 +241,8 @@ class SPRouter(app_manager.RyuApp):
 
     # -----------------------------------------------------------------------
     # DIJKSTRA — standard single-source shortest path on the switch graph.
-    # Returns {dst_dpid: next_hop_dpid} from src_dpid.
+    # Returns {dst_dpid: next_hop_dpid} representing the first hop from
+    # src_dpid toward every reachable destination switch.
     # -----------------------------------------------------------------------
     def dijkstra(self, src_dpid):
         dist = {dpid: float('inf') for dpid in self.adjacency}
@@ -182,53 +277,8 @@ class SPRouter(app_manager.RyuApp):
         return next_hop
 
     # -----------------------------------------------------------------------
-    # INSTALL ROUTES FOR ALL KNOWN HOSTS
-    # Called once when both adjacency (from get_link) AND all host attachment
-    # ports (from ARP learning) are available.
-    # -----------------------------------------------------------------------
-    def install_all_routes(self):
-        """
-        Proactively install routes for every host whose edge-switch attachment
-        port has already been learned via ARP.  Any host not yet seen will have
-        its routes installed when it sends its first ARP (see handle_arp).
-        """
-        installed = 0
-        for host_ip, (edge_dpid, host_port) in self.host_to_edge.items():
-            self.install_host_routes(host_ip, edge_dpid, host_port)
-            installed += 1
-        self.logger.info("install_all_routes: pushed routes for %d hosts", installed)
-
-    # -----------------------------------------------------------------------
-    # INSTALL ROUTES FOR ONE HOST across every switch in the fabric.
-    # -----------------------------------------------------------------------
-    def install_host_routes(self, host_ip, edge_dpid, host_port):
-        for dpid, datapath in self.datapaths.items():
-            parser = datapath.ofproto_parser
-
-            if dpid == edge_dpid:
-                out_port = host_port
-            else:
-                if dpid not in self.adjacency:
-                    self.logger.warning("dpid %d missing from adjacency", dpid)
-                    continue
-                next_hops = self.dijkstra(dpid)
-                if edge_dpid not in next_hops:
-                    self.logger.warning("No path: switch %d → %d", dpid, edge_dpid)
-                    continue
-                out_port = self.adjacency[dpid][next_hops[edge_dpid]]
-
-            actions = [parser.OFPActionOutput(out_port)]
-
-            match_ip  = parser.OFPMatch(eth_type=0x0800, ipv4_dst=host_ip)
-            match_arp = parser.OFPMatch(eth_type=0x0806, arp_tpa=host_ip)
-            self.add_flow(datapath, 1, match_ip,  actions)
-            self.add_flow(datapath, 1, match_arp, actions)
-
-        self.logger.info("Routes installed for host %s (edge sw %d port %d)",
-                         host_ip, edge_dpid, host_port)
-
-    # -----------------------------------------------------------------------
-    # PACKET IN
+    # PACKET IN — only ARP packets should reach the controller once routes
+    # are installed (IP is handled fully in hardware by the flow rules).
     # -----------------------------------------------------------------------
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
@@ -240,18 +290,17 @@ class SPRouter(app_manager.RyuApp):
 
         pkt     = packet.Packet(msg.data)
         arp_pkt = pkt.get_protocol(arp.arp)
-        ip_pkt  = pkt.get_protocol(ipv4.ipv4)
 
         if arp_pkt:
             self.handle_arp(datapath, in_port, arp_pkt, msg)
-        # IP packets hitting the controller means routes aren't installed yet —
-        # drop silently to avoid loops.
+        # IP packets hitting the controller mean routes aren't ready yet — drop.
 
     # -----------------------------------------------------------------------
     # ARP HANDLER
-    # Two responsibilities:
-    #   1. Learn host attachment point → install full fabric routes proactively.
-    #   2. Answer ARP requests (unicast reply if MAC known, flood otherwise).
+    # Once routes are installed, switches forward ARP directly via the
+    # arp_tpa flow rules — so only ARPs sent before the 2-second build window
+    # closes will reach the controller.  We flood those to prevent black holes
+    # during startup, and we learn MACs to answer future ARP requests.
     # -----------------------------------------------------------------------
     def handle_arp(self, datapath, in_port, arp_pkt, msg):
         ofproto = datapath.ofproto
@@ -261,17 +310,8 @@ class SPRouter(app_manager.RyuApp):
         src_mac = arp_pkt.src_mac
         dst_ip  = arp_pkt.dst_ip
 
-        # Learn MAC
+        # Learn MAC mapping
         self.arp_table[src_ip] = src_mac
-
-        # Learn host attachment and install routes (first time only)
-        if src_ip not in self.host_to_edge:
-            self.host_to_edge[src_ip] = (datapath.id, in_port)
-            self.logger.info("Learned host %s → sw %d port %d",
-                             src_ip, datapath.id, in_port)
-            # Only install routes once inter-switch adjacency is ready
-            if self.topo_ready:
-                self.install_host_routes(src_ip, datapath.id, in_port)
 
         # Unicast ARP reply if we already know the target's MAC
         if arp_pkt.opcode == arp.ARP_REQUEST and dst_ip in self.arp_table:
@@ -296,7 +336,7 @@ class SPRouter(app_manager.RyuApp):
             datapath.send_msg(out)
             return
 
-        # Flood — ARP request with unknown target, or an ARP reply
+        # Flood — ARP request for unknown MAC, or an ARP reply in transit
         out = parser.OFPPacketOut(
             datapath=datapath,
             buffer_id=msg.buffer_id,
