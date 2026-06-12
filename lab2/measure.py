@@ -2,10 +2,13 @@
 
 import time
 import re
+import importlib
 from mininet.log import setLogLevel, info
 from mininet.clean import cleanup
-import fat_tree
 import topo
+
+# Dynamically import fat-tree.py to bypass Python's hyphen restriction
+fat_tree = importlib.import_module("fat-tree")
 
 def run_experiment():
     setLogLevel('info')
