@@ -1,0 +1,18 @@
+Performance Comparison: SP Routing vs Two-Level Routing
+=======================================================
+
+Single flow TCP throughput (cross-pod, iperf):
+
+              SP Routing    FT Routing
+h1 -> h9:    13.5 Mbits/s  13.5 Mbits/s
+h1 -> h13:   13.5 Mbits/s  13.5 Mbits/s
+h2 -> h10:   13.5 Mbits/s  13.4 Mbits/s
+
+Single flows perform similarly under both schemes as a single
+flow uses one path and is limited by the 15 Mbps link bandwidth.
+
+The difference becomes visible under multiple simultaneous flows.
+SP routing sends all flows through the same shortest path, causing
+congestion on shared core switches. Two-level routing distributes
+traffic across all core switches using suffix-based load balancing,
+giving each flow more bandwidth when running in parallel.
