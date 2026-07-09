@@ -39,6 +39,13 @@ class MyCollectives(Collectives):
         ip = get_ip()
         self.bcast = ip.rsplit(".", 1)[0] + ".255"
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # SO_REUSEPORT lets a leftover/closing bind be replaced immediately so
+        # a crashed or Ctrl-C'd worker doesn't block the next run on the port.
+        try:
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except (AttributeError, OSError):
+            pass
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         self.sock.bind(("", SML_PORT))
         self.sock.settimeout(SOCK_TIMEOUT)
