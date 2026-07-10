@@ -4,7 +4,7 @@ import struct
 import time
 
 from util.collectives import Collectives, Test
-from util.network import get_ip, set_drop_prob, recv, send
+from util.network import get_iface, get_ip, set_drop_prob, recv, send
 
 # ---------------- protocol constants (must match switch.p4) ------------------
 SML_PORT = 47474      # UDP port the switch intercepts (and workers listen on)
@@ -33,20 +33,29 @@ class MyCollectives(Collectives):
         self.rank = rank
         self.world = world
 
-        # Workers send to the subnet broadcast address, so no ARP resolution
-        # is ever needed, and they all listen on the same UDP port so a single
-        # broadcast response from the switch reaches everyone.
+        # Workers send to the subnet broadcast address so the frame reaches
+        # the switch without needing ARP. The switch identifies AllReduce
+        # traffic by UDP port and replies by UNICAST (swapping src/dst) back
+        # to this worker's own IP/MAC, which the host accepts normally. (An
+        # earlier broadcast-reply design was silently dropped by the host UDP
+        # stack on the return path -- hence the unicast switch reply.)
+        self.iface = get_iface()
         ip = get_ip()
         self.bcast = ip.rsplit(".", 1)[0] + ".255"
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        # SO_REUSEPORT lets a leftover/closing bind be replaced immediately so
-        # a crashed or Ctrl-C'd worker doesn't block the next run on the port.
         try:
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         except (AttributeError, OSError):
             pass
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        # Pin all traffic to the switch-facing interface so the broadcast
+        # egresses there rather than being resolved via a routing guess.
+        try:
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE,
+                                 self.iface.encode())
+        except (AttributeError, OSError):
+            pass
         self.sock.bind(("", SML_PORT))
         self.sock.settimeout(SOCK_TIMEOUT)
 

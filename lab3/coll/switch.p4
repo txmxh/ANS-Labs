@@ -169,6 +169,18 @@ control ingress(inout headers_t hdr,
   register<bit<32>>(NSLOTS) pool6;
   register<bit<32>>(NSLOTS) pool7;
 
+  // Turn the incoming request into a reply addressed back to its sender:
+  // swap Ethernet and IPv4 src/dst. UDP ports are symmetric here (both
+  // ends use SML_PORT) so they need no swap.
+  action swap_addr() {
+    bit<48> m = hdr.ethernet.srcAddr;
+    hdr.ethernet.srcAddr = hdr.ethernet.dstAddr;
+    hdr.ethernet.dstAddr = m;
+    bit<32> a = hdr.ipv4.srcAddr;
+    hdr.ipv4.srcAddr = hdr.ipv4.dstAddr;
+    hdr.ipv4.dstAddr = a;
+  }
+
   apply {
     if (hdr.sml.isValid() && hdr.sml.flags == SML_REQ) {
       bit<32> slot = (bit<32>)hdr.sml.slot;
@@ -216,9 +228,15 @@ control ingress(inout headers_t hdr,
           agg_count.write(idx, 0);
           hdr.sml.flags = SML_RES;
           hdr.udp.checksum = 0;   // payload changed; 0 = "no checksum" for UDP/IPv4
-          flood_mgid.read(std.mcast_grp, 0);
-          log_msg("SML complete: slot={} ver={} chunk={}",
-                  {hdr.sml.slot, hdr.sml.ver, hdr.sml.chunk});
+          // Unicast the result straight back to the worker whose packet
+          // completed the round (swap L2+L3 src/dst). The OTHER workers
+          // obtain their copy via the re-serve path when they retransmit
+          // on timeout -- this avoids IP broadcast entirely, which the host
+          // UDP stack was silently dropping on the return path.
+          swap_addr();
+          std.egress_spec = std.ingress_port;
+          log_msg("SML complete: slot={} ver={} chunk={} -> port {}",
+                  {hdr.sml.slot, hdr.sml.ver, hdr.sml.chunk, std.ingress_port});
         } else {
           agg_count.write(idx, cnt);
           mark_to_drop(std);
@@ -238,6 +256,7 @@ control ingress(inout headers_t hdr,
           READBACK(pool7, hdr.sml.v7)
           hdr.sml.flags = SML_RES;
           hdr.udp.checksum = 0;
+          swap_addr();
           std.egress_spec = std.ingress_port;
           log_msg("SML re-serve: slot={} ver={} chunk={} rank={}",
                   {hdr.sml.slot, hdr.sml.ver, hdr.sml.chunk, hdr.sml.rank});
