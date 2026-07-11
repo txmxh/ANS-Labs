@@ -35,10 +35,11 @@ class MyCollectives(Collectives):
 
         # Workers send to the subnet broadcast address so the frame reaches
         # the switch without needing ARP. The switch identifies AllReduce
-        # traffic by UDP port and replies by UNICAST (swapping src/dst) back
-        # to this worker's own IP/MAC, which the host accepts normally. (An
-        # earlier broadcast-reply design was silently dropped by the host UDP
-        # stack on the return path -- hence the unicast switch reply.)
+        # traffic by UDP port. Completed results come back as broadcasts
+        # (re-served results as unicasts), both originated from the switch's
+        # pseudo identity (10.0.0.254) -- reflecting the request's addresses
+        # instead would get the packets dropped by Linux as martian/spoofed
+        # sources. Binding to INADDR_ANY below receives both kinds.
         self.iface = get_iface()
         ip = get_ip()
         self.bcast = ip.rsplit(".", 1)[0] + ".255"

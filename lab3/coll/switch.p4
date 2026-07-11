@@ -34,6 +34,15 @@ const bit<16> ETH_TYPE_IPV4 = 0x0800;
 const bit<8>  IPPROTO_UDP   = 17;
 const bit<32> PKT_INSTANCE_TYPE_REPLICATION = 5;
 
+// Pseudo identity used as the SOURCE of every packet the switch originates
+// (results). It must be a plain unicast address that belongs to no host:
+// reflecting the request's addresses instead would produce packets that the
+// workers' Linux IP stack silently rejects -- either because the source is
+// the subnet broadcast (martian source), or, for the broadcast copy that
+// returns to the round's last contributor, the receiver's OWN IP (spoofed).
+const bit<48> SWITCH_MAC = 48w0x02534D4C00FE;  // locally administered, "SML"
+const bit<32> SWITCH_IP  = 32w0x0A0000FE;      // 10.0.0.254
+
 const bit<8> SML_REQ = 0;   // worker -> switch: contribution
 const bit<8> SML_RES = 1;   // switch -> worker(s): aggregated result
 
@@ -169,16 +178,26 @@ control ingress(inout headers_t hdr,
   register<bit<32>>(NSLOTS) pool6;
   register<bit<32>>(NSLOTS) pool7;
 
-  // Turn the incoming request into a reply addressed back to its sender:
-  // swap Ethernet and IPv4 src/dst. UDP ports are symmetric here (both
-  // ends use SML_PORT) so they need no swap.
-  action swap_addr() {
-    bit<48> m = hdr.ethernet.srcAddr;
-    hdr.ethernet.srcAddr = hdr.ethernet.dstAddr;
-    hdr.ethernet.dstAddr = m;
-    bit<32> a = hdr.ipv4.srcAddr;
-    hdr.ipv4.srcAddr = hdr.ipv4.dstAddr;
-    hdr.ipv4.dstAddr = a;
+  // Result packets are ORIGINATED by the switch and carry SWITCH_MAC/IP as
+  // their source (see the note at the constants above). UDP ports are
+  // symmetric here (both ends use SML_PORT) so they need no change.
+
+  // Broadcast a completed result to every worker via the flood group. The
+  // IP destination stays the subnet broadcast the workers sent to, which
+  // every socket bound to INADDR_ANY:SML_PORT receives.
+  action broadcast_result() {
+    hdr.ethernet.srcAddr = SWITCH_MAC;
+    hdr.ethernet.dstAddr = 48w0xFFFFFFFFFFFF;
+    hdr.ipv4.srcAddr     = SWITCH_IP;
+    flood_mgid.read(std.mcast_grp, 0);
+  }
+
+  // Unicast a re-served result back to the one worker that asked again.
+  action reply_to_sender() {
+    hdr.ethernet.dstAddr = hdr.ethernet.srcAddr;
+    hdr.ethernet.srcAddr = SWITCH_MAC;
+    hdr.ipv4.dstAddr     = hdr.ipv4.srcAddr;
+    hdr.ipv4.srcAddr     = SWITCH_IP;
   }
 
   apply {
@@ -228,15 +247,12 @@ control ingress(inout headers_t hdr,
           agg_count.write(idx, 0);
           hdr.sml.flags = SML_RES;
           hdr.udp.checksum = 0;   // payload changed; 0 = "no checksum" for UDP/IPv4
-          // Unicast the result straight back to the worker whose packet
-          // completed the round (swap L2+L3 src/dst). The OTHER workers
-          // obtain their copy via the re-serve path when they retransmit
-          // on timeout -- this avoids IP broadcast entirely, which the host
-          // UDP stack was silently dropping on the return path.
-          swap_addr();
-          std.egress_spec = std.ingress_port;
-          log_msg("SML complete: slot={} ver={} chunk={} -> port {}",
-                  {hdr.sml.slot, hdr.sml.ver, hdr.sml.chunk, std.ingress_port});
+          // Broadcast the result to ALL workers via the flood multicast
+          // group. The egress filter deliberately lets SML packets go back
+          // out the ingress port, so the last contributor gets its copy too.
+          broadcast_result();
+          log_msg("SML complete: slot={} ver={} chunk={} -> broadcast",
+                  {hdr.sml.slot, hdr.sml.ver, hdr.sml.chunk});
         } else {
           agg_count.write(idx, cnt);
           mark_to_drop(std);
@@ -256,7 +272,7 @@ control ingress(inout headers_t hdr,
           READBACK(pool7, hdr.sml.v7)
           hdr.sml.flags = SML_RES;
           hdr.udp.checksum = 0;
-          swap_addr();
+          reply_to_sender();
           std.egress_spec = std.ingress_port;
           log_msg("SML re-serve: slot={} ver={} chunk={} rank={}",
                   {hdr.sml.slot, hdr.sml.ver, hdr.sml.chunk, hdr.sml.rank});
@@ -296,9 +312,23 @@ control deparse(packet_out pkt, in headers_t hdr) {
   }
 }
 
-// We never modify any IPv4 header field, so the original IP checksum stays
-// valid. The UDP checksum is set to 0 (legal for UDP over IPv4) whenever the
-// payload is rewritten. No checksum computation needed.
 control no_checksum(inout headers_t hdr, inout metadata_t meta) { apply {  } }
 
-V1Switch(parse(),no_checksum(),ingress(),egress(),no_checksum(),deparse()) main;
+// Result packets get the switch's pseudo source IP written into them, which
+// invalidates the IPv4 header checksum -- recompute it on the way out (for
+// untouched packets this just recomputes the value they already carry). The
+// UDP checksum is set to 0 (legal for UDP over IPv4) whenever the payload
+// is rewritten, so it needs no computation.
+control compute_checksum(inout headers_t hdr, inout metadata_t meta) {
+  apply {
+    update_checksum(
+        hdr.ipv4.isValid(),
+        { hdr.ipv4.version, hdr.ipv4.ihl, hdr.ipv4.tos,
+          hdr.ipv4.totalLen, hdr.ipv4.identification, hdr.ipv4.flags,
+          hdr.ipv4.fragOffset, hdr.ipv4.ttl, hdr.ipv4.protocol,
+          hdr.ipv4.srcAddr, hdr.ipv4.dstAddr },
+        hdr.ipv4.hdrChecksum, HashAlgorithm.csum16);
+  }
+}
+
+V1Switch(parse(),no_checksum(),ingress(),egress(),compute_checksum(),deparse()) main;
